@@ -572,246 +572,260 @@ using System.Runtime.Intrinsics.X86;
 
 
 #region Customer Segmentation
+// ─────────────────────────────────────────────────
+// LOAD BOOKS (was missing)
+// ─────────────────────────────────────────────────
+var booksPath = "C:/FYJIXFINAL/UAT/ML.NET/ModelMaker/Dataset/RecommendationEngine/Books.csv";
+var books = File.ReadAllLines(booksPath)
+    .Skip(1)
+    .Select(line => line.Split(','))
+    .Where(cols => cols.Length >= 2)
+    .Select(cols => new BookContent
+    {
+        ISBN = cols[0].Trim(),
+        Title = cols[1].Trim()
+    })
+    .ToList();
 
-//var usersPath = "C:/FYJIXFINAL/UAT/ML.NET/ModelMaker/Dataset/RecommendationEngine/Users.csv";
+// ─────────────────────────────────────────────────
+// LOAD AND PREVIEW USER RATINGS
+// ─────────────────────────────────────────────────
+var usersPath = "C:/FYJIXFINAL/UAT/ML.NET/ModelMaker/Dataset/RecommendationEngine/Users.csv";
 
-//var lines2 = File.ReadAllLines(usersPath).Take(5);
-//foreach (var line in lines2)
-//    Console.WriteLine($"RAW: {line}");
+var lines2 = File.ReadAllLines(usersPath).Take(5);
+foreach (var line in lines2)
+    Console.WriteLine($"RAW: {line}");
 
-//Console.WriteLine("\n=== Customer Segmentation ===\n");
+Console.WriteLine("\n=== Customer Segmentation ===\n");
 
-//// ─────────────────────────────────────────────────
-//// STEP 1 — Build user profiles from ratings
-//// ─────────────────────────────────────────────────
-//Console.WriteLine("Building user profiles...");
+// ─────────────────────────────────────────────────
+// STEP 1 — Build user profiles from ratings
+// ─────────────────────────────────────────────────
+Console.WriteLine("Building user profiles...");
 
-//var bookLookup = books
-//    .GroupBy(x => x.ISBN)
-//    .ToDictionary(g => g.Key, g => g.First());
+var bookLookup = books
+    .GroupBy(x => x.ISBN)
+    .ToDictionary(g => g.Key, g => g.First());
 
-//var rawData2 = File.ReadAllLines(usersPath)
-//    .Skip(1)
-//    .Select(line => line.Split(','))
-//    .Where(cols => cols.Length == 3)
-//    .Select(cols => new
-//    {
-//        UserId = cols[0].Trim(),
-//        ISBN = cols[1].Trim(),
-//        Rating = float.TryParse(cols[2].Trim(), out var r) ? r : -1f
-//    })
-//    .Where(x => x.Rating > 0 && bookLookup.ContainsKey(x.ISBN)) // only books we know about
-//    .ToList();
+var rawData2 = File.ReadAllLines(usersPath)
+    .Skip(1)
+    .Select(line => line.Split(','))
+    .Where(cols => cols.Length == 3)
+    .Select(cols => new
+    {
+        UserId = cols[0].Trim(),
+        ISBN = cols[1].Trim(),
+        Rating = float.TryParse(cols[2].Trim(), out var r) ? r : -1f
+    })
+    .Where(x => x.Rating > 0 && bookLookup.ContainsKey(x.ISBN)) // only books we know about
+    .ToList();
 
+var userProfiles = rawData2
+    .GroupBy(x => x.UserId)
+    .Where(g => g.Count() >= 3) // need minimum ratings for meaningful profile
+    .Select(g =>
+    {
+        var ratings = g.Select(x => x.Rating).ToList();
+        var total = ratings.Count;
+        var avg = ratings.Average();
+        var liked = ratings.Count(r => r >= 8f) / (float)total;
+        var disliked = ratings.Count(r => r <= 4f) / (float)total;
+        var variance = ratings.Select(r => Math.Pow(r - avg, 2)).Average();
 
+        return new UserProfile
+        {
+            UserId = g.Key,
+            TotalRatings = total,
+            AvgRating = (float)avg,
+            PercentLiked = liked,
+            PercentDisliked = disliked,
+            RatingVariance = (float)variance
+        };
+    })
+    .ToList();
 
-//var userProfiles = rawData2
-//    .GroupBy(x => x.UserId)
-//    .Where(g => g.Count() >= 3) // need minimum ratings for meaningful profile
-//    .Select(g =>
-//    {
-//        var ratings = g.Select(x => x.Rating).ToList();
-//        var total = ratings.Count;
-//        var avg = ratings.Average();
-//        var liked = ratings.Count(r => r >= 8f) / (float)total;
-//        var disliked = ratings.Count(r => r <= 4f) / (float)total;
-//        var variance = ratings.Select(r => Math.Pow(r - avg, 2)).Average();
+Console.WriteLine($"User profiles built: {userProfiles.Count}");
 
-//        return new UserProfile
-//        {
-//            UserId = g.Key,
-//            TotalRatings = total,
-//            AvgRating = (float)avg,
-//            PercentLiked = liked,
-//            PercentDisliked = disliked,
-//            RatingVariance = (float)variance
-//        };
-//    })
-//    .ToList();
+// ─────────────────────────────────────────────────
+// STEP 2 — Convert to ML.NET feature vectors
+// ─────────────────────────────────────────────────
 
-//Console.WriteLine($"User profiles built: {userProfiles.Count}");
+// Normalize each feature to 0-1 range so no single feature dominates
+float Normalize(float value, float min, float max) =>
+    max == min ? 0f : (value - min) / (max - min);
 
-//// ─────────────────────────────────────────────────
-//// STEP 2 — Convert to ML.NET feature vectors
-//// ─────────────────────────────────────────────────
+var minTotal = userProfiles.Min(x => x.TotalRatings);
+var maxTotal = userProfiles.Max(x => x.TotalRatings);
+var minAvg = userProfiles.Min(x => x.AvgRating);
+var maxAvg = userProfiles.Max(x => x.AvgRating);
+var minVariance = userProfiles.Min(x => x.RatingVariance);
+var maxVariance = userProfiles.Max(x => x.RatingVariance);
 
-//// Normalize each feature to 0-1 range so no single feature dominates
-//float Normalize(float value, float min, float max) =>
-//    max == min ? 0f : (value - min) / (max - min);
+var featureData = userProfiles
+    .Select(u => new UserFeatures
+    {
+        Features = new float[]
+        {
+                    Normalize(u.TotalRatings,    minTotal,    maxTotal),
+                    Normalize(u.AvgRating,       minAvg,      maxAvg),
+                    u.PercentLiked,      // already 0-1
+                    u.PercentDisliked,   // already 0-1
+                    Normalize(u.RatingVariance,  minVariance, maxVariance)
+        }
+    })
+    .ToList();
 
-//var minTotal = userProfiles.Min(x => x.TotalRatings);
-//var maxTotal = userProfiles.Max(x => x.TotalRatings);
-//var minAvg = userProfiles.Min(x => x.AvgRating);
-//var maxAvg = userProfiles.Max(x => x.AvgRating);
-//var minVariance = userProfiles.Min(x => x.RatingVariance);
-//var maxVariance = userProfiles.Max(x => x.RatingVariance);
+// ─────────────────────────────────────────────────
+// STEP 3 — Elbow Method (find best K)
+// ─────────────────────────────────────────────────
+Console.WriteLine("\nFinding optimal K using Elbow Method...");
+Console.WriteLine($"{"K",-5} {"Inertia",-15} {"Improvement",-15}");
+Console.WriteLine(new string('-', 35));
 
-//var featureData = userProfiles
-//    .Select(u => new UserFeatures
-//    {
-//        Features = new float[]
-//        {
-//            Normalize(u.TotalRatings,    minTotal,    maxTotal),
-//            Normalize(u.AvgRating,       minAvg,      maxAvg),
-//            u.PercentLiked,      // already 0-1
-//            u.PercentDisliked,   // already 0-1
-//            Normalize(u.RatingVariance,  minVariance, maxVariance)
-//        }
-//    })
-//    .ToList();
+var mlContextCluster = new MLContext(seed: 1);
+var dataForClustering = mlContextCluster.Data.LoadFromEnumerable(featureData);
 
-//// ─────────────────────────────────────────────────
-//// STEP 3 — Elbow Method (find best K)
-//// ─────────────────────────────────────────────────
-//Console.WriteLine("\nFinding optimal K using Elbow Method...");
-//Console.WriteLine($"{"K",-5} {"Inertia",-15} {"Improvement",-15}");
-//Console.WriteLine(new string('-', 35));
+var inertiaScores = new Dictionary<int, double>();
+double prevInertia = double.MaxValue;
 
-//var mlContextCluster = new MLContext(seed: 1);
-//var dataForClustering = mlContextCluster.Data.LoadFromEnumerable(featureData);
+for (int k = 2; k <= 10; k++)
+{
+    var clusterPipeline = mlContextCluster.Transforms
+        .NormalizeMinMax("Features")
+        .Append(mlContextCluster.Clustering.Trainers.KMeans(
+            featureColumnName: "Features",
+            numberOfClusters: k
+        ));
 
-//var inertiaScores = new Dictionary<int, double>();
-//double prevInertia = double.MaxValue;
+    var clusterModel = clusterPipeline.Fit(dataForClustering);
+    var clusterPreds = clusterModel.Transform(dataForClustering);
 
-//for (int k = 2; k <= 10; k++)
-//{
-//    var clusterPipeline = mlContextCluster.Transforms
-//        .NormalizeMinMax("Features")
-//        .Append(mlContextCluster.Clustering.Trainers.KMeans(
-//            featureColumnName: "Features",
-//            numberOfClusters: k
-//        ));
+    // Inertia = sum of squared distances to cluster centers
+    var clusterResults = mlContextCluster.Data
+        .CreateEnumerable<UserSegment>(clusterPreds, reuseRowObject: false)
+        .ToList();
 
-//    var clusterModel = clusterPipeline.Fit(dataForClustering);
-//    var clusterPreds = clusterModel.Transform(dataForClustering);
+    // Score array contains distances to each cluster — min = distance to assigned cluster
+    double inertia = clusterResults
+        .Sum(x => x.Score != null && x.Score.Length > 0 ? x.Score.Min() : 0f);
 
-//    // Inertia = sum of squared distances to cluster centers
-//    var clusterResults = mlContextCluster.Data
-//        .CreateEnumerable<UserSegment>(clusterPreds, reuseRowObject: false)
-//        .ToList();
+    inertiaScores[k] = inertia;
 
-//    // Score array contains distances to each cluster — min = distance to assigned cluster
-//    double inertia = clusterResults
-//        .Sum(x => x.Score != null ? x.Score.Min() : 0f);
+    var improvement = prevInertia == double.MaxValue
+        ? 0
+        : ((prevInertia - inertia) / prevInertia) * 100;
 
-//    inertiaScores[k] = inertia;
+    Console.WriteLine($"{k,-5} {inertia,-15:F2} {(prevInertia == double.MaxValue ? "baseline" : $"{improvement:F1}% better"),-15}");
 
-//    var improvement = prevInertia == double.MaxValue
-//        ? 0
-//        : ((prevInertia - inertia) / prevInertia) * 100;
+    prevInertia = inertia;
+}
 
-//    Console.WriteLine($"{k,-5} {inertia,-15:F2} {(prevInertia == double.MaxValue ? "baseline" : $"{improvement:F1}% better"),-15}");
+// ─────────────────────────────────────────────────
+// STEP 4 — Pick best K automatically (FIXED LOGIC)
+// Pick the K where improvement drops below 15%
+// ─────────────────────────────────────────────────
+int bestK = 3; // default fallback
 
-//    prevInertia = inertia;
-//}
+for (int k = 3; k <= 10; k++)
+{
+    var improvement = (inertiaScores[k - 1] - inertiaScores[k])
+                    / inertiaScores[k - 1] * 100;
+    if (improvement < 15.0)
+    {
+        bestK = k - 1;
+        break; // Exit once we find the elbow
+    }
+}
 
-//// ─────────────────────────────────────────────────
-//// STEP 4 — Pick best K automatically
-//// Pick the K where improvement drops below 15%
-//// ─────────────────────────────────────────────────
-//int bestK = 3; // default fallback
+Console.WriteLine($"\nOptimal K = {bestK} ✅");
 
-//for (int k = 3; k <= 10; k++)
-//{
-//    var improvement = (inertiaScores[k - 1] - inertiaScores[k])
-//                    / inertiaScores[k - 1] * 100;
-//    if (improvement < 15.0)
-//    {
-//        bestK = k - 1;
-//        break;
-//    }
-//    bestK = k;
-//}
+// ─────────────────────────────────────────────────
+// STEP 5 — Train final model with best K
+// ─────────────────────────────────────────────────
+Console.WriteLine($"\nTraining final model with K={bestK}...");
 
-//Console.WriteLine($"\nOptimal K = {bestK} ✅");
+var finalPipeline = mlContextCluster.Transforms
+    .NormalizeMinMax("Features")
+    .Append(mlContextCluster.Clustering.Trainers.KMeans(
+        featureColumnName: "Features",
+        numberOfClusters: bestK
+    ));
 
-//// ─────────────────────────────────────────────────
-//// STEP 5 — Train final model with best K
-//// ─────────────────────────────────────────────────
-//Console.WriteLine($"\nTraining final model with K={bestK}...");
+var finalModel = finalPipeline.Fit(dataForClustering);
+var finalPreds = finalModel.Transform(dataForClustering);
 
-//var finalPipeline = mlContextCluster.Transforms
-//    .NormalizeMinMax("Features")
-//    .Append(mlContextCluster.Clustering.Trainers.KMeans(
-//        featureColumnName: "Features",
-//        numberOfClusters: bestK
-//    ));
+var segmentResults = mlContextCluster.Data
+    .CreateEnumerable<UserSegment>(finalPreds, reuseRowObject: false)
+    .ToList();
 
-//var finalModel = finalPipeline.Fit(dataForClustering);
-//var finalPreds = finalModel.Transform(dataForClustering);
+// Zip results back with user profiles
+var usersWithSegments = userProfiles
+    .Zip(segmentResults, (profile, segment) => new
+    {
+        profile.UserId,
+        profile.TotalRatings,
+        profile.AvgRating,
+        profile.PercentLiked,
+        profile.PercentDisliked,
+        profile.RatingVariance,
+        Segment = (int)segment.ClusterId
+    })
+    .ToList();
 
-//var segmentResults = mlContextCluster.Data
-//    .CreateEnumerable<UserSegment>(finalPreds, reuseRowObject: false)
-//    .ToList();
+// ─────────────────────────────────────────────────
+// STEP 6 — Analyze each segment
+// ─────────────────────────────────────────────────
+Console.WriteLine($"\n=== Segment Analysis ===\n");
 
-//// Zip results back with user profiles
-//var usersWithSegments = userProfiles
-//    .Zip(segmentResults, (profile, segment) => new
-//    {
-//        profile.UserId,
-//        profile.TotalRatings,
-//        profile.AvgRating,
-//        profile.PercentLiked,
-//        profile.PercentDisliked,
-//        profile.RatingVariance,
-//        Segment = (int)segment.ClusterId
-//    })
-//    .ToList();
+for (int seg = 1; seg <= bestK; seg++)
+{
+    var group = usersWithSegments.Where(x => x.Segment == seg).ToList();
+    if (!group.Any()) continue;
 
-//// ─────────────────────────────────────────────────
-//// STEP 6 — Analyze each segment
-//// ─────────────────────────────────────────────────
-//Console.WriteLine($"\n=== Segment Analysis ===\n");
+    var avgTotal = group.Average(x => x.TotalRatings);
+    var avgRating = group.Average(x => x.AvgRating);
+    var avgLiked = group.Average(x => x.PercentLiked) * 100;
+    var avgDisliked = group.Average(x => x.PercentDisliked) * 100;
+    var avgVariance = group.Average(x => x.RatingVariance);
 
-//for (int seg = 1; seg <= bestK; seg++)
-//{
-//    var group = usersWithSegments.Where(x => x.Segment == seg).ToList();
-//    if (!group.Any()) continue;
+    // Auto label the segment based on behavior
+    var label = (avgRating, avgTotal, avgLiked) switch
+    {
+        var (r, t, l) when r >= 8f && t >= 20f => "⭐ Enthusiast Readers",
+        var (r, t, l) when r >= 8f && t < 20f => "👍 Casual Fans",
+        var (r, t, l) when r < 5f => "👎 Harsh Critics",
+        var (r, t, l) when l >= 0.7f => "😍 Generous Raters",
+        _ => "📚 Average Readers"
+    };
 
-//    var avgTotal = group.Average(x => x.TotalRatings);
-//    var avgRating = group.Average(x => x.AvgRating);
-//    var avgLiked = group.Average(x => x.PercentLiked) * 100;
-//    var avgDisliked = group.Average(x => x.PercentDisliked) * 100;
-//    var avgVariance = group.Average(x => x.RatingVariance);
+    Console.WriteLine($"Segment {seg} — {label}");
+    Console.WriteLine($"  Users:           {group.Count}");
+    Console.WriteLine($"  Avg Ratings:     {avgTotal:F0} books rated");
+    Console.WriteLine($"  Avg Score Given: {avgRating:F2} / 10");
+    Console.WriteLine($"  % Liked (8-10):  {avgLiked:F1}%");
+    Console.WriteLine($"  % Disliked(1-4): {avgDisliked:F1}%");
+    Console.WriteLine($"  Rating Variance: {avgVariance:F2}");
+    Console.WriteLine();
+}
 
-//    // Auto label the segment based on behavior
-//    var label = (avgRating, avgTotal, avgLiked) switch
-//    {
-//        var (r, t, l) when r >= 8f && t >= 20f => "⭐ Enthusiast Readers",
-//        var (r, t, l) when r >= 8f && t < 20f => "👍 Casual Fans",
-//        var (r, t, l) when r < 5f => "👎 Harsh Critics",
-//        var (r, t, l) when l >= 0.7f => "😍 Generous Raters",
-//        _ => "📚 Average Readers"
-//    };
+// ─────────────────────────────────────────────────
+// STEP 7 — Show sample users per segment
+// ─────────────────────────────────────────────────
+Console.WriteLine("=== Sample Users per Segment ===\n");
 
-//    Console.WriteLine($"Segment {seg} — {label}");
-//    Console.WriteLine($"  Users:           {group.Count}");
-//    Console.WriteLine($"  Avg Ratings:     {avgTotal:F0} books rated");
-//    Console.WriteLine($"  Avg Score Given: {avgRating:F2} / 10");
-//    Console.WriteLine($"  % Liked (8-10):  {avgLiked:F1}%");
-//    Console.WriteLine($"  % Disliked(1-4): {avgDisliked:F1}%");
-//    Console.WriteLine($"  Rating Variance: {avgVariance:F2}");
-//    Console.WriteLine();
-//}
+for (int seg = 1; seg <= bestK; seg++)
+{
+    var group = usersWithSegments
+        .Where(x => x.Segment == seg)
+        .Take(3)
+        .ToList();
 
-//// ─────────────────────────────────────────────────
-//// STEP 7 — Show sample users per segment
-//// ─────────────────────────────────────────────────
-//Console.WriteLine("=== Sample Users per Segment ===\n");
-
-//for (int seg = 1; seg <= bestK; seg++)
-//{
-//    var group = usersWithSegments
-//        .Where(x => x.Segment == seg)
-//        .Take(3)
-//        .ToList();
-
-//    Console.WriteLine($"Segment {seg}:");
-//    Console.WriteLine($"  {"UserId",-10} {"Ratings",-10} {"AvgScore",-10} {"Liked%",-10} {"Disliked%",-10}");
-//    Console.WriteLine($"  {new string('-', 55)}");
-//    group.ForEach(u => Console.WriteLine(
-//        $"  {u.UserId,-10} {u.TotalRatings,-10:F0} {u.AvgRating,-10:F2} {u.PercentLiked * 100,-10:F1} {u.PercentDisliked * 100,-10:F1}"));
-//    Console.WriteLine();
-//}
+    Console.WriteLine($"Segment {seg}:");
+    Console.WriteLine($"  {"UserId",-10} {"Ratings",-10} {"AvgScore",-10} {"Liked%",-10} {"Disliked%",-10}");
+    Console.WriteLine($"  {new string('-', 55)}");
+    group.ForEach(u => Console.WriteLine(
+        $"  {u.UserId,-10} {u.TotalRatings,-10:F0} {u.AvgRating,-10:F2} {u.PercentLiked * 100,-10:F1} {u.PercentDisliked * 100,-10:F1}"));
+    Console.WriteLine();
+}
 
 #endregion
